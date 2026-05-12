@@ -2,36 +2,29 @@ mod processing;
 mod results;
 mod setup;
 
+use crate::models::config::{AlignConfig, NcbiConfig, PipelineConfig, PipelineStep};
 use crate::models::message::MessageType;
 use crate::models::{message::Message as Msg, protein::MatchResult};
-use iced::futures::{channel, SinkExt};
+use crate::proc;
+use chrono::Local;
+use directories::ProjectDirs;
+use iced::futures::{SinkExt, channel};
 use iced::theme::Palette;
-use iced::widget::pane_grid::Target;
-use iced::widget::{button, column, container, opaque, row, space, stack, text};
-use iced::{
-    Background, Border, Color, Element, Length, Task, Theme, alignment, color, futures, stream,
-    window,
-};
-use tokio::time;
+use iced::widget::{button, column, container, opaque, stack, text};
+use iced::{Background, Color, Element, Length, Task, Theme, alignment, window};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
+
+const icon: &[u8] = include_bytes!("../assets/icon.png");
 
 pub fn run_app() -> iced::Result {
     iced::application(RoseApp::default, RoseApp::update, RoseApp::view)
-        .theme(|_state: &RoseApp| {
-            Theme::custom(
-                "Forest".to_string(),
-                Palette {
-                    background: color!(0x002626),
-                    text: color!(0xb2c2b0),
-                    primary: color!(0x104110),
-                    success: color!(0xc3e88d),
-                    warning: color!(0xffcb6b),
-                    danger: color!(0xf07178),
-                },
-            )
-        })
+        .theme(|_state: &RoseApp| Theme::CatppuccinFrappe)
         .title("ROSE - Rust Ortholog Search Engine")
         .window(window::Settings {
             maximized: true,
+            icon: window::icon::from_file_data(icon, Option::from(image::ImageFormat::Png)).ok(),
             ..Default::default()
         })
         .run()
@@ -53,9 +46,9 @@ pub struct RoseApp {
     pub(in crate::gui) source_input: String,
     pub(in crate::gui) target_input: String,
 
-    // Methods
-    pub(in crate::gui) use_api: bool,
-    pub(in crate::gui) use_align: bool,
+    // UI Checkbox State
+    pub(in crate::gui) ui_use_api: bool,
+    pub(in crate::gui) ui_use_align: bool,
 
     // Output
     pub(in crate::gui) results: Vec<MatchResult>,
@@ -64,23 +57,16 @@ pub struct RoseApp {
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::gui) enum Message {
-    // Setup Page Messages
+pub enum Message {
     SourceChanged(String),
     TargetChanged(String),
     ToggleApiMethod(bool),
     ToggleAlignMethod(bool),
     StartSearch,
-
-    // Processing Messages
     SearchCompleted(Vec<MatchResult>),
     LogReceived(Msg),
-
-    // Results Page Messages
     ExportResults,
     BackToSetup,
-
-    // Common Messages
     ClosePopup,
 }
 
@@ -91,31 +77,28 @@ impl RoseApp {
                 self.source_input = source;
                 Task::none()
             }
-
             Message::TargetChanged(target) => {
                 self.target_input = target;
                 Task::none()
             }
-
-            Message::ToggleApiMethod(use_api) => {
-                self.use_api = use_api;
+            Message::ToggleApiMethod(val) => {
+                self.ui_use_api = val;
                 Task::none()
             }
-
-            Message::ToggleAlignMethod(use_align) => {
-                self.use_align = use_align;
+            Message::ToggleAlignMethod(val) => {
+                self.ui_use_align = val;
                 Task::none()
             }
 
             Message::StartSearch => {
                 let mut warnings = Vec::new();
-                if self.source_input.is_empty() {
+                if self.source_input.trim().is_empty() {
                     warnings.push("Source Organism");
                 }
-                if self.target_input.is_empty() {
+                if self.target_input.trim().is_empty() {
                     warnings.push("Target Organism");
                 }
-                if !self.use_api && !self.use_align {
+                if !self.ui_use_api && !self.ui_use_align {
                     warnings.push("Mapping Method");
                 }
 
@@ -124,7 +107,6 @@ impl RoseApp {
                         msg: format!("Missing:\n{}", warnings.join("\n")),
                         msg_type: MessageType::Error,
                     }];
-
                     return Task::none();
                 }
 
@@ -132,40 +114,72 @@ impl RoseApp {
                 self.logs.clear();
                 self.popup_msg.clear();
 
+                let mut pipeline_steps = Vec::new();
+
+                if self.ui_use_api {
+                    let ncbi_cfg = NcbiConfig {
+                        api_key: String::new(),
+                        max_retries: 3,
+                    };
+
+                    pipeline_steps.push(PipelineStep::FindReferenceGenome(ncbi_cfg.clone()));
+
+                    pipeline_steps.push(PipelineStep::FetchGenomeAnnotations(ncbi_cfg.clone()));
+
+                    pipeline_steps.push(PipelineStep::ParseXmlAnnotations);
+                }
+
+                if self.ui_use_align {
+                    pipeline_steps.push(PipelineStep::FetchTargetProteome);
+                    pipeline_steps.push(PipelineStep::RunAlignment(AlignConfig {
+                        min_identity: 30.0,
+                    }));
+                }
+
+                let final_config = PipelineConfig {
+                    steps: pipeline_steps,
+                };
+
                 Task::run(
-                    run_engine_stream(
+                    proc::run_pipeline(
                         self.source_input.clone(),
                         self.target_input.clone(),
-                        self.use_api,
-                        self.use_align,
+                        final_config,
                     ),
                     |message| message,
                 )
             }
-
             Message::SearchCompleted(results) => {
                 self.results = results;
                 self.screen = CurrentScreen::Results;
                 Task::none()
             }
-
             Message::LogReceived(msg) => {
+                let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+                let log_line = format!("[{}] [{:?}] {}\n", timestamp, msg.msg_type, msg.msg);
+
+                let log_file_path = get_log_path();
+
+                if let Ok(mut file) = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log_file_path)
+                {
+                    let _ = file.write_all(log_line.as_bytes());
+                }
+
                 self.logs.push(msg);
                 Task::none()
             }
-
             Message::ExportResults => {
-                // TODO: Implement
                 println!("Not implemented yet!");
                 Task::none()
             }
-
             Message::BackToSetup => {
                 self.results.clear();
                 self.screen = CurrentScreen::Setup;
                 Task::none()
             }
-
             Message::ClosePopup => {
                 self.popup_msg.clear();
                 Task::none()
@@ -230,81 +244,33 @@ impl RoseApp {
 
 fn popup_style(theme: &Theme) -> container::Style {
     let pallete = theme.palette();
-
     container::Style {
         background: Some(Background::Color(pallete.background)),
         ..Default::default()
     }
 }
 
-fn overlay_style(theme: &Theme) -> container::Style {
+fn overlay_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(Color::from_rgba8(0, 10, 10, 0.85))),
         ..Default::default()
     }
 }
 
-fn run_engine_stream(
-    source: String,
-    target: String,
-    use_api: bool,
-    use_align: bool,
-) -> impl futures::Stream<Item = Message> {
-    stream::channel(100, move |mut output: channel::mpsc::Sender<Message> | async move {
-        let _ = output
-            .send(Message::LogReceived(Msg {
-                msg: format!(
-                    "Initializing ROSE pipeline\n\tSource: {}\n\tTarget: {}\n\tSelected methods: {}",
-                    source,
-                    target,
-                    "Align" //TODO
-                ),
-                msg_type: MessageType::Info,
-            }))
-            .await;
+fn get_log_path() -> PathBuf {
+    let logfile = format!("rose_{}.log", Local::now().format("%Y-%m-%d"));
 
-        time::sleep(std::time::Duration::from_millis(1500)).await;
+    if cfg!(debug_assertions) {
+        PathBuf::from(logfile)
+    } else {
+        if let Some(proj_dirs) = ProjectDirs::from("cz", "tkysela", "ROSE") {
+            let data_dir = proj_dirs.data_dir();
 
+            let _ = fs::create_dir_all(data_dir);
 
-        let _ = output
-            .send(Message::LogReceived(Msg {
-                msg: "Network latency detected. Switching to fallback mirror...".to_string(),
-                msg_type: MessageType::Warning,
-            }))
-            .await;
-
-        time::sleep(std::time::Duration::from_millis(800)).await;
-
-        let _ = output
-            .send(Message::LogReceived(Msg {
-                msg: "Pipeline complete! Formatting results...".to_string(),
-                msg_type: MessageType::Info,
-            }))
-            .await;
-
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        let dummy_results = vec![
-            MatchResult {
-                query: "HXK1".to_string(),
-                target: "HXK2".to_string(),
-                score: 145.0,
-                identity: 85.5,
-            },
-            MatchResult {
-                query: "GAL4".to_string(),
-                target: "GAL4".to_string(),
-                score: 320.0,
-                identity: 99.1,
-            },
-            MatchResult {
-                query: "CDC28".to_string(),
-                target: "CDK1".to_string(),
-                score: 210.0,
-                identity: 76.3,
-            },
-        ];
-
-        let _ = output.send(Message::SearchCompleted(dummy_results)).await;
-    })
+            data_dir.join(logfile)
+        } else {
+            PathBuf::from(logfile)
+        }
+    }
 }

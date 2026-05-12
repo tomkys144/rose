@@ -1,0 +1,17 @@
+                                                           +---------> Run Uniprot Alignment ----+
+                                                           |                                     |
+                                                           |                                     |
+                                                           |                                     |
+                                 +-------> Parse annotation+-------->  Run Refseq Alignment -----+----> Sort and leave Max number----------------->
+                                 |                         |                                     |
+                                 |                         |                                     |
+                                 |                         |                                     |
+                                 |                         +---------> Run other Alignments -----+
+                                 |                         |
+Search ------> Choose & Download |                         |
+                                 |                         |
+                                 |                         +--------------------------------------------------------------------------------------->
+                                 |
+                                 |
+                                 |
+                                 +-------> K-mer quick align --------> SW Alignment --------------------------------------------------------------> 
