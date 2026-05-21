@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload binaries to release
+        uses: actions/upload-artifact@v4
+        with:
+          name: 'rose-${{ matrix.name }}'
+          path: target/${{ matrix.target }}/release/rose${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: target/${{ matrix.target }}/release/rose${{ matrix.os == 'windows-latest' && '.exe' || '' }}
