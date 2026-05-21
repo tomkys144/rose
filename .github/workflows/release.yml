@@ -36,14 +36,20 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Prepare binary
+        shell: bash
+        run: |
+          mkdir -p staging
+          mv target/${{ matrix.target }}/release/rose${{ matrix.os == 'windows-latest' && '.exe' || '' }} staging/rose-${{ matrix.name }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+
       - name: Upload binaries to release
         uses: actions/upload-artifact@v4
         with:
           name: 'rose-${{ matrix.name }}'
-          path: target/${{ matrix.target }}/release/rose${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          path: staging/rose-${{ matrix.name }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}
 
       - name: Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: target/${{ matrix.target }}/release/rose${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          files: staging/rose-${{ matrix.name }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}
