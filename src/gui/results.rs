@@ -1,5 +1,6 @@
 use crate::gui::{Message, RoseApp};
-use iced::widget::{button, row, scrollable, space, text};
+use crate::models::message::MessageType;
+use iced::widget::{button, container, row, scrollable, space, text};
 use iced::{Element, Length};
 
 pub fn view_results(app: &RoseApp) -> Element<Message> {
@@ -12,15 +13,40 @@ pub fn view_results(app: &RoseApp) -> Element<Message> {
     .spacing(10);
 
     let results_list: Element<_> = app
+        .ctx
         .results
         .iter()
-        .fold(iced::widget::column![].spacing(10), |col, res| {
+        .filter(|(_, res)| !res.is_empty())
+        .fold(iced::widget::column![].spacing(10), |col, (key, res)| {
+            let (score_str, identity_str) = if let Some(first_match) = res.first() {
+                (
+                    format!("{:.1}", first_match.score),
+                    format!("{:.1}%", first_match.identity),
+                )
+            } else {
+                ("N/A".to_string(), "N/A".to_string())
+            };
+
+            let src = &app.ctx.src_proteome[key.0.as_str()];
+            let src_id = if let Some(up_id) = &src.uniprot_id {
+                format!("uniprot|{}", up_id)
+            } else {
+                format!("EMBL|{}", src.gene_id)
+            };
+
+            let tgt = &app.ctx.tgt_proteome[key.1.as_str()];
+            let tgt_id = if let Some(up_id) = &tgt.uniprot_id {
+                format!("uniprot|{}", up_id)
+            } else {
+                format!("EMBL|{}", tgt.gene_id)
+            };
+
             col.push(
                 row![
-                    text(&res.query).width(Length::Fill),
-                    text(&res.target).width(Length::Fill),
-                    text(format!("{:.1}", res.score)).width(Length::Fill),
-                    text(format!("{:.1}%", res.identity)).width(Length::Fill),
+                    text(src_id).width(Length::Fill),
+                    text(tgt_id).width(Length::Fill),
+                    text(score_str).width(Length::Fill),
+                    text(identity_str).width(Length::Fill),
                 ]
                 .spacing(10),
             )
@@ -29,7 +55,7 @@ pub fn view_results(app: &RoseApp) -> Element<Message> {
 
     let table = iced::widget::column![
         header,
-        space::horizontal().height(10),
+        space::vertical().height(10),
         scrollable(results_list).height(Length::Fill)
     ]
     .spacing(10);
@@ -44,14 +70,19 @@ pub fn view_results(app: &RoseApp) -> Element<Message> {
     ]
     .spacing(20);
 
-    iced::widget::column![
-        text("Mapping Results").size(32),
-        table,
-        space::horizontal().height(20),
-        controls
-    ]
-    .spacing(20)
+    container(
+        iced::widget::column![
+            text("Mapping Results").size(32),
+            table,
+            space::vertical().height(20),
+            controls
+        ]
+        .spacing(20)
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
     .width(Length::Fill)
     .height(Length::Fill)
+    .padding(40)
     .into()
 }

@@ -25,9 +25,23 @@ pub fn view(app: &RoseApp) -> Element<Message> {
             MessageType::Error => log_txt.style(text::danger),
         };
 
-        let entry = row![styled_tm_stamp, styled_txt]
+        let entry = if let Some(branch) = &log.branch {
+            row![
+                styled_tm_stamp,
+                text(format!("[{}] ", branch)).style(text::secondary),
+                styled_txt
+            ]
             .spacing(20)
-            .align_y(Alignment::Start);
+            .align_y(Alignment::Start)
+        } else {
+            row![
+                styled_tm_stamp,
+                text(format!("[{}] ", "Main")).style(text::secondary),
+                styled_txt
+            ]
+            .spacing(20)
+            .align_y(Alignment::Start)
+        };
 
         col.push(entry)
     });
@@ -37,12 +51,19 @@ pub fn view(app: &RoseApp) -> Element<Message> {
         .height(Length::FillPortion(80))
         .padding(15);
 
-    column![
-        text("Running ROSE pipeline...").size(20),
-        space::vertical().height(20),
-        log_term
-    ]
-    .align_x(Alignment::Center)
-    .spacing(20)
+    container(
+        column![
+            text("Running ROSE pipeline...").size(20),
+            space::vertical().height(20),
+            log_term
+        ]
+        .align_x(Alignment::Center)
+        .spacing(20),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding(40)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
     .into()
 }

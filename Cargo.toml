@@ -5,18 +5,22 @@ edition = "2024"
 authors = ["Bc. Tomáš Kysela <kyseltom@fel.cvut.cz>"]
 description = "Rust Ortholog Search Engine - Tool for mapping orthologs in genomes"
 publish = false
-rust-version = "1.93.0"
 repository = "https://github.com/tomkys144/rose"
 
 [dependencies]
 anyhow = "1.0.102"
 chrono = "0.4.44"
 iced = { version = "0.14.0", features = ["tokio", "canvas", "image"] }
-quick-xml = "0.39.4"
+quick-xml = "0.40.0"
 rayon = "1.12.0"
 reqwest = { version = "0.13.3", features = ["blocking", "json", "query"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.52.1", features = ["full"] }
 directories = "6.0.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+bio = "3.0.0"
+rfd = "0.17.2"
+
+[build-dependencies]
+winresource = "0.1.31"
 

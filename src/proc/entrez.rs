@@ -18,30 +18,27 @@ struct EsearchResult {
 pub fn find_ref_genome(context: &mut PipelineContext, config: &NcbiConfig) -> Result<()> {
     let client = reqwest::blocking::Client::new();
 
-    let mut query = format!(
-        "\"{}\"[Organism] AND srcdb_refseq[PROP] AND biomol_genomic[PROP]",
-        context.source
-    );
+    let build_query = |organism: &str| -> String {
+        format!(
+            "{}[Organism] AND srcdb_refseq[PROP] AND biomol_genomic[PROP]",
+            organism
+        )
+    };
 
-    let src_ids = search_entrez(&client, &query, &config.api_key, "nuccore")?;
+    let src_query = build_query(&context.source);
+    let src_ids = search_entrez(&client, &src_query, &config.api_key, "nuccore")?;
 
     if src_ids.is_empty() {
-        return Err(anyhow!("No reference genome found for {}", context.source));
+        return Err(anyhow!("No reference genome found for: {}", context.source));
     }
-
     context.src_genome_ids = src_ids;
 
-    query = format!(
-        "\"{}\"[Organism] AND srcdb_refseq[PROP] AND biomol_genomic[PROP]",
-        context.target
-    );
-
-    let tgt_ids = search_entrez(&client, &query, &config.api_key, "nuccore")?;
+    let tgt_query = build_query(&context.target);
+    let tgt_ids = search_entrez(&client, &tgt_query, &config.api_key, "nuccore")?;
 
     if tgt_ids.is_empty() {
-        return Err(anyhow!("No reference genome found for {}", context.target));
+        return Err(anyhow!("No reference genome found for: {}", context.target));
     }
-
     context.tgt_genome_ids = tgt_ids;
 
     Ok(())

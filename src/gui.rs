@@ -2,29 +2,42 @@ mod processing;
 mod results;
 mod setup;
 
-use crate::models::config::{AlignConfig, NcbiConfig, PipelineConfig, PipelineStep};
+use crate::models::config::{AlignConfig, NcbiConfig, ParseConfig, PipelineConfig, PipelineStep};
+use crate::models::context::PipelineContext;
 use crate::models::message::MessageType;
 use crate::models::{message::Message as Msg, protein::MatchResult};
 use crate::proc;
 use chrono::Local;
 use directories::ProjectDirs;
+use iced::Theme::Custom;
 use iced::futures::{SinkExt, channel};
 use iced::theme::Palette;
+use iced::wgpu::naga::proc::ensure_block_returns;
 use iced::widget::{button, column, container, opaque, stack, text};
 use iced::{Background, Color, Element, Length, Task, Theme, alignment, window};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
-const icon: &[u8] = include_bytes!("../assets/icon.png");
+const ICON: &[u8] = include_bytes!("../assets/icon.png");
+
+const ROSE_COLORS: Palette = Palette {
+    primary: Color::from_rgb8(191, 98, 54),
+    background: Color::from_rgb8(227, 209, 181),
+    text: Color::from_rgb8(70, 82, 100),
+    success: Color::from_rgb8(60, 110, 83),
+    warning: Color::from_rgb8(200, 115, 35),
+    danger: Color::from_rgb8(166, 45, 32),
+};
 
 pub fn run_app() -> iced::Result {
     iced::application(RoseApp::default, RoseApp::update, RoseApp::view)
-        .theme(|_state: &RoseApp| Theme::CatppuccinFrappe)
+        .theme(|_state: &RoseApp| Theme::custom("ROSE theme", ROSE_COLORS))
         .title("ROSE - Rust Ortholog Search Engine")
         .window(window::Settings {
             maximized: true,
-            icon: window::icon::from_file_data(icon, Option::from(image::ImageFormat::Png)).ok(),
+            icon: window::icon::from_file_data(ICON, Option::from(image::ImageFormat::Png)).ok(),
             ..Default::default()
         })
         .run()
@@ -51,7 +64,7 @@ pub struct RoseApp {
     pub(in crate::gui) ui_use_align: bool,
 
     // Output
-    pub(in crate::gui) results: Vec<MatchResult>,
+    pub(in crate::gui) ctx: PipelineContext,
     pub(in crate::gui) logs: Vec<Msg>,
     pub(in crate::gui) popup_msg: Vec<Msg>,
 }
@@ -63,9 +76,10 @@ pub enum Message {
     ToggleApiMethod(bool),
     ToggleAlignMethod(bool),
     StartSearch,
-    SearchCompleted(Vec<MatchResult>),
+    SearchCompleted(PipelineContext),
     LogReceived(Msg),
     ExportResults,
+    ExportCompleted(Result<PathBuf, String>),
     BackToSetup,
     ClosePopup,
 }
@@ -106,6 +120,7 @@ impl RoseApp {
                     self.popup_msg = vec![Msg {
                         msg: format!("Missing:\n{}", warnings.join("\n")),
                         msg_type: MessageType::Error,
+                        branch: None,
                     }];
                     return Task::none();
                 }
@@ -116,25 +131,53 @@ impl RoseApp {
 
                 let mut pipeline_steps = Vec::new();
 
+                let ncbi_cfg = NcbiConfig {
+                    api_key: String::new(),
+                    max_retries: 3,
+                };
+
+                pipeline_steps.push(PipelineStep::FindReferenceGenome(ncbi_cfg.clone()));
+                pipeline_steps.push(PipelineStep::FetchGenomeAnnotations(ncbi_cfg.clone()));
+
+                let mut branches = Vec::new();
+
                 if self.ui_use_api {
-                    let ncbi_cfg = NcbiConfig {
-                        api_key: String::new(),
-                        max_retries: 3,
+                    let parse_cfg = ParseConfig {
+                        gap_open: -10,
+                        gap_extend: -1,
+                        min_identity: 30.0,
+                        score_matrix: "Blosum 62".to_string(),
                     };
 
-                    pipeline_steps.push(PipelineStep::FindReferenceGenome(ncbi_cfg.clone()));
+                    let mut parse_steps: Vec<PipelineStep> = Vec::new();
 
-                    pipeline_steps.push(PipelineStep::FetchGenomeAnnotations(ncbi_cfg.clone()));
+                    parse_steps.push(PipelineStep::ParseXmlAnnotations());
+                    parse_steps.push(PipelineStep::FetchMissingUniprot());
+                    parse_steps.push(PipelineStep::AlignFound(parse_cfg.clone()));
 
-                    pipeline_steps.push(PipelineStep::ParseXmlAnnotations);
+                    branches.push(parse_steps);
                 }
 
                 if self.ui_use_align {
-                    pipeline_steps.push(PipelineStep::FetchTargetProteome);
-                    pipeline_steps.push(PipelineStep::RunAlignment(AlignConfig {
+                    let mut align_steps = Vec::new();
+
+                    align_steps.push(PipelineStep::RunAlignment(AlignConfig {
+                        gap_open: -10,
+                        gap_extend: -1,
                         min_identity: 30.0,
+                        score_matrix: "Blosum 62".to_string(),
                     }));
+                    align_steps.push(PipelineStep::AlignFound(ParseConfig {
+                        gap_open: -10,
+                        gap_extend: -1,
+                        min_identity: 30.0,
+                        score_matrix: "Blosum 62".to_string(),
+                    }));
+
+                    branches.push(align_steps);
                 }
+
+                pipeline_steps.push(PipelineStep::ParallelBranches(branches));
 
                 let final_config = PipelineConfig {
                     steps: pipeline_steps,
@@ -149,8 +192,8 @@ impl RoseApp {
                     |message| message,
                 )
             }
-            Message::SearchCompleted(results) => {
-                self.results = results;
+            Message::SearchCompleted(ctx) => {
+                self.ctx = ctx;
                 self.screen = CurrentScreen::Results;
                 Task::none()
             }
@@ -172,11 +215,100 @@ impl RoseApp {
                 Task::none()
             }
             Message::ExportResults => {
-                println!("Not implemented yet!");
+                let results_clone = self.ctx.results.clone();
+                let src_proteome_clone = self.ctx.src_proteome.clone();
+                let tgt_proteome_clone = self.ctx.tgt_proteome.clone();
+
+                Task::perform(
+                    async move {
+                        let file_handle = rfd::AsyncFileDialog::new()
+                            .set_file_name("rose_export.csv")
+                            .add_filter("CSV", &["csv"])
+                            .save_file()
+                            .await;
+
+                        let file_path = match file_handle {
+                            Some(handle) => handle.path().to_path_buf(),
+                            None => return Err("Export canceled by user".to_string()),
+                        };
+
+                        let mut file = match std::fs::OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .truncate(true)
+                            .open(&file_path)
+                        {
+                            Ok(f) => f,
+                            Err(e) => return Err(format!("Failed to create export file:\n{}", e)),
+                        };
+
+                        if let Err(e) = writeln!(
+                            file,
+                            "Source Gene,Source UniProt,Target Gene,Target UniProt,Score,Identity (%)"
+                        ) {
+                            return Err(format!("Failed to write data to file:\n{}", e));
+                        }
+
+                        for ((src_key, tgt_key), match_results) in &results_clone {
+                            if let Some(res) = match_results.first() {
+                                let src_prot = src_proteome_clone.get(src_key);
+                                let tgt_prot = tgt_proteome_clone.get(tgt_key);
+
+                                let src_gene =
+                                    src_prot.map(|p| p.gene_id.as_str()).unwrap_or("N/A");
+                                let src_uniprot = src_prot
+                                    .and_then(|p| p.uniprot_id.as_deref())
+                                    .unwrap_or("N/A");
+
+                                let tgt_gene =
+                                    tgt_prot.map(|p| p.gene_id.as_str()).unwrap_or("N/A");
+                                let tgt_uniprot = tgt_prot
+                                    .and_then(|p| p.uniprot_id.as_deref())
+                                    .unwrap_or("N/A");
+
+                                let _ = writeln!(
+                                    file,
+                                    "{},{},{},{},{},{:.1}",
+                                    src_gene,
+                                    src_uniprot,
+                                    tgt_gene,
+                                    tgt_uniprot,
+                                    res.score,
+                                    res.identity
+                                );
+                            }
+                        }
+
+                        Ok(file_path)
+                    },
+                    Message::ExportCompleted,
+                )
+            }
+
+            Message::ExportCompleted(result) => {
+                match result {
+                    Ok(path) => {
+                        self.popup_msg.push(Msg {
+                            msg: format!("Successfully exported results to:\n{}", path.display()),
+                            msg_type: MessageType::Info,
+                            branch: None,
+                        });
+                    }
+                    Err(err) => {
+                        if err != "Export cancelled by user." {
+                            self.popup_msg.push(Msg {
+                                msg: err,
+                                msg_type: MessageType::Error,
+                                branch: None,
+                            });
+                        }
+                    }
+                }
                 Task::none()
             }
+
             Message::BackToSetup => {
-                self.results.clear();
+                self.ctx.clear();
                 self.screen = CurrentScreen::Setup;
                 Task::none()
             }
@@ -196,10 +328,7 @@ impl RoseApp {
 
         let main_ui = container(base_content)
             .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(40)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill);
+            .height(Length::Fill);
 
         if let Some(popup_msg) = self.popup_msg.first() {
             let popup_txt = text(&popup_msg.msg).size(16);
